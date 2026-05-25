@@ -240,13 +240,13 @@ function startScan() {
 
       if (type === 'repo_detail' && data.repo) {
         document.getElementById('reposSection').classList.remove('hidden');
-        const grid = document.getElementById('reposGrid');
-        const card = document.createElement('div');
+        var grid = document.getElementById('reposGrid');
+        var card = document.createElement('div');
         card.className = 'repo-card';
         card.innerHTML = '<div class="repo-name"><a href="https://github.com/' + data.repo +
           '" target="_blank" style="color:inherit">' + data.repo + '</a></div>' +
-          '<div class="repo-desc">' + (data.description || '—') + '</div>' +
-          '<div class="repo-meta"><span class="star">⭐ ' + (data.stars||0).toLocaleString() + '</span></div>';
+          '<div class="repo-desc">' + (data.description || 'No description') + '</div>' +
+          '<div class="repo-meta"><span class="star">Stars: ' + (data.stars||0).toLocaleString() + '</span></div>';
         grid.appendChild(card);
       }
 
@@ -254,20 +254,21 @@ function startScan() {
         setChip('analysis', 'done');
         setChip('profiles', 'done');
         document.getElementById('contributorsSection').classList.remove('hidden');
-        const tbody = document.getElementById('contributorsBody');
+        var tbody = document.getElementById('contributorsBody');
         tbody.innerHTML = '';
-        data.top_contributors.forEach(c => {
-          const tier = c.tier || 'active';
-          const score = Math.min(100, c.activity_score || 0);
-          const tr = document.createElement('tr');
+        data.top_contributors.forEach(function(c) {
+          var tier = c.tier || 'active';
+          var score = Math.min(100, c.activity_score || 0);
+          var tr = document.createElement('tr');
+          var emailCell = c.email ? '<a href="mailto:' + c.email + '" style="color:#58a6ff">' + c.email + '</a>' : '<span style="color:#484f58">none</span>';
+          var companyRow = c.company ? '<br><small style="color:#8b949e">' + c.company + '</small>' : '';
           tr.innerHTML =
-            '<td><a href="' + c.profile_url + '" target="_blank" class="username">@' + c.username + '</a>' +
-              (c.company ? '<br><small style="color:#8b949e">' + c.company + '</small>' : '') + '</td>' +
+            '<td><a href="' + c.profile_url + '" target="_blank" class="username">@' + c.username + '</a>' + companyRow + '</td>' +
             '<td><span class="tier tier-' + tier + '">' + tier + '</span></td>' +
             '<td><div style="font-weight:600">' + score + '</div>' +
               '<div class="score-bar"><div class="score-fill" style="width:' + score + '%"></div></div></td>' +
-            '<td style="font-size:12px">' + (c.email ? '<a href="mailto:' + c.email + '" style="color:#58a6ff">' + c.email + '</a>' : '<span style="color:#484f58">—</span>') + '</td>' +
-            '<td style="color:#8b949e;font-size:12px">' + (c.summary || c.bio || '—') + '</td>' +
+            '<td style="font-size:12px">' + emailCell + '</td>' +
+            '<td style="color:#8b949e;font-size:12px">' + (c.summary || c.bio || 'No summary') + '</td>' +
             '<td style="font-size:12px;color:#8b949e">' + (c.repos_contributed || []).join('<br>') + '</td>';
           tbody.appendChild(tr);
         });
@@ -276,7 +277,7 @@ function startScan() {
       }
 
       if (type === 'error') {
-        log('❌ ' + text, true);
+        log('ERROR: ' + text, true);
         document.getElementById('scanBtn').disabled = false;
         es.close();
       }
@@ -296,7 +297,7 @@ function startScan() {
 
 @app.route("/")
 def index():
-    return render_template_string(GITHUB_RADAR_HTML)
+    return GITHUB_RADAR_HTML
 
 
 @app.route("/api/github/stream")
