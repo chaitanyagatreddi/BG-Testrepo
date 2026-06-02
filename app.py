@@ -157,7 +157,7 @@ GITHUB_RADAR_HTML = """<!DOCTYPE html>
         <option value="12">12</option>
       </select>
     </div>
-    <button id="scanBtnGithub" onclick="startScan('github')">🔍 Scan GitHub</button>
+    <button id="scanBtn" onclick="startScan()">🔍 Scan GitHub</button>
   </div>
 
   <div style="margin-top:14px">
@@ -168,6 +168,13 @@ GITHUB_RADAR_HTML = """<!DOCTYPE html>
       <div class="agent-chip" id="chip-contributors">👥 Contributors</div>
       <div class="agent-chip" id="chip-profiles">👤 Profiles</div>
       <div class="agent-chip" id="chip-analysis">🤖 Analysis</div>
+    </div>
+  </div>
+
+  <div style="margin-top:12px">
+    <div style="font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Email Sources</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">
+      <div class="source-chip enabled" id="src-github" title="GitHub events API + commit patches">📧 GitHub Commits</div>
     </div>
   </div>
 
@@ -182,14 +189,9 @@ GITHUB_RADAR_HTML = """<!DOCTYPE html>
 </div>
 
 <div class="card hidden" id="contributorsSection">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-    <h3 style="font-size:13px; color:#8b949e; text-transform:uppercase; letter-spacing:.05em;">
-      👥 Top Contributors
-    </h3>
-    <button id="exportCsvBtn" onclick="exportCSV()" style="background:#238636;border:none;color:#fff;padding:7px 18px;font-size:13px;font-weight:600;border-radius:6px;cursor:pointer;letter-spacing:.02em;">
-      ⬇ Export CSV
-    </button>
-  </div>
+  <h3 style="font-size:13px; color:#8b949e; text-transform:uppercase; letter-spacing:.05em; margin-bottom:12px">
+    👥 Top Contributors
+  </h3>
   <table class="contributors-table">
     <thead>
       <tr>
@@ -206,32 +208,6 @@ GITHUB_RADAR_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-var _contributorsData = [];
-
-function exportCSV() {
-  if (!_contributorsData.length) return;
-  var headers = ['Username','Profile URL','Tier','Score','Email','Summary','Repos'];
-  var rows = _contributorsData.map(function(c) {
-    return [
-      c.username || '',
-      c.profile_url || '',
-      c.tier || '',
-      c.activity_score || 0,
-      c.email || '',
-      (c.summary || c.bio || '').replace(/,/g, ' '),
-      (c.repos_contributed || []).join(' | ')
-    ].map(function(v) { return '"' + String(v).replace(/"/g, '""') + '"'; }).join(',');
-  });
-  var csv = [headers.join(',')].concat(rows).join('\n');
-  var blob = new Blob([csv], {type: 'text/csv'});
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = 'gitradar_' + (document.getElementById('keyword').value || 'export').replace(/\s+/g,'_') + '.csv';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 function setKeyword(kw) {
   document.getElementById('keyword').value = kw;
   document.querySelectorAll('.tool-chip').forEach(c => c.classList.remove('active'));
@@ -259,16 +235,18 @@ function setSrc(id, state) {
   el.className = 'source-chip ' + state;
 }
 
+function getEnabledSources() {
+  return 'github';
+}
 
-function startScan(source) {
+function startScan() {
   const keyword = document.getElementById('keyword').value.trim();
   if (!keyword) return;
   const maxRepos = document.getElementById('maxRepos').value;
   const maxContributors = document.getElementById('maxContributors').value;
-  const sources = source || 'github';
+  const sources = getEnabledSources();
 
-  document.getElementById('scanBtnGithub').disabled = true;
-  _contributorsData = [];
+  document.getElementById('scanBtn').disabled = true;
   document.getElementById('reposSection').classList.add('hidden');
   document.getElementById('contributorsSection').classList.add('hidden');
   document.getElementById('reposGrid').innerHTML = '';
@@ -300,10 +278,8 @@ function startScan(source) {
       if (type === 'repos_found')                            setChip('search', 'done');
       if (type === 'contributors_found')                     setChip('contributors', 'active');
       if (type === 'profiling')                              { setChip('contributors', 'done'); setChip('profiles', 'active'); }
-      if (type === 'crawling_email' && text.includes('[GitHub]'))       setSrc('github', 'running');
-      if (type === 'email_found'    && text.includes('[GitHub]'))       setSrc('github', 'found');
-      if (type === 'crawling_email' && text.includes('[SO]'))           setSrc('stackoverflow', 'running');
-      if (type === 'email_found'    && text.includes('[SO]'))           setSrc('stackoverflow', 'found');
+      if (type === 'crawling_email' && text.includes('[GitHub]')) setSrc('github', 'running');
+      if (type === 'email_found'    && text.includes('[GitHub]')) setSrc('github', 'found');
       if (type === 'analyzing')   { setChip('profiles','done'); setChip('analysis', 'active'); }
       if (type === 'scored')       setChip('analysis', 'active');
 
@@ -322,7 +298,6 @@ function startScan(source) {
       if (type === 'complete' && data.top_contributors) {
         setChip('analysis', 'done');
         setChip('profiles', 'done');
-        _contributorsData = data.top_contributors;
         document.getElementById('contributorsSection').classList.remove('hidden');
         var tbody = document.getElementById('contributorsBody');
         tbody.innerHTML = '';
@@ -342,13 +317,13 @@ function startScan(source) {
             '<td style="font-size:12px;color:#8b949e">' + (c.repos_contributed || []).join('<br>') + '</td>';
           tbody.appendChild(tr);
         });
-        document.getElementById('scanBtnGithub').disabled = false;
+        document.getElementById('scanBtn').disabled = false;
         es.close();
       }
 
       if (type === 'error') {
         log('ERROR: ' + text, true);
-        document.getElementById('scanBtnGithub').disabled = false;
+        document.getElementById('scanBtn').disabled = false;
         es.close();
       }
     } catch(err) { console.error(err); }
@@ -356,7 +331,7 @@ function startScan(source) {
 
   es.onerror = function() {
     log('Connection closed');
-    document.getElementById('scanBtnGithub').disabled = false;
+    document.getElementById('scanBtn').disabled = false;
     es.close();
   };
 }
@@ -367,10 +342,7 @@ function startScan(source) {
 
 @app.route("/")
 def index():
-    from flask import make_response
-    resp = make_response(GITHUB_RADAR_HTML)
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    return GITHUB_RADAR_HTML
 
 
 @app.route("/og.png")
