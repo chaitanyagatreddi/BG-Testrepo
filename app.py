@@ -121,6 +121,12 @@ GITHUB_RADAR_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<div id="wakeNotice" style="background:#161b22;border:1px solid #f0883e;border-radius:8px;padding:10px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px;font-size:13px;color:#f0883e;">
+  <span>⏳</span>
+  <span>This space runs on a free server — it may take <strong>30–60 seconds</strong> to wake up. Hang tight.</span>
+  <button onclick="document.getElementById('wakeNotice').style.display='none'" style="margin-left:auto;background:none;border:none;color:#f0883e;cursor:pointer;font-size:16px;line-height:1;">×</button>
+</div>
+
 <div class="header">
   <h1>🛡️ GitHub Radar</h1>
   <span class="badge">Cybersecurity Contributors</span>
