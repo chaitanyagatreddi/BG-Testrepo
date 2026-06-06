@@ -33,6 +33,7 @@ import openai
 GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
 OPENAI_KEY     = os.environ.get("OPENAI_API_KEY", "")
 SE_APP_KEY     = os.environ.get("SE_APP_KEY", "")   # optional — raises limit to 10k/day
+PROSPEO_API_KEY = os.environ.get("PROSPEO_API_KEY", "")
 
 # ── Data structures ───────────────────────────────────────────────
 
@@ -334,6 +335,50 @@ class GitHubBrowserScanner:
 
         return ""
 
+    # ── Fix C: Prospeo enrichment by name + company ───────────────
+
+    @staticmethod
+    def enrich_via_prospeo(name: str, company: str, username: str) -> str:
+        """Lookup contributor email via Prospeo API.
+
+        Uses name + company (from GitHub profile) to find verified work email.
+        Returns email or empty string. Costs 1 credit per successful match.
+        """
+        if not PROSPEO_API_KEY:
+            return ""
+        if not name or not company:
+            return ""
+        try:
+            parts = name.strip().split(maxsplit=1)
+            first = parts[0]
+            last = parts[1] if len(parts) > 1 else ""
+            payload = {
+                "first_name": first,
+                "last_name": last,
+                "full_name": name,
+                "company_name": company,
+                "only_verified_email": True,
+            }
+            req = urllib.request.Request(
+                "https://api.prospeo.io/email-finder",
+                data=json.dumps(payload).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-KEY": PROSPEO_API_KEY,
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            if data.get("response", {}).get("email"):
+                email = data["response"]["email"].lower()
+                NOREPLY = {"noreply@github.com", "users.noreply.github.com"}
+                if not any(nr in email for nr in NOREPLY):
+                    return email
+        except Exception:
+            pass
+        return ""
+
     # ── Fix B: DuckDuckGo search via Firecrawl ───────────────────
 
     @staticmethod
@@ -600,14 +645,45 @@ Return JSON only. No markdown:
 
 # ── Main Agent ────────────────────────────────────────────────────
 
+def parse_github_url(url: str) -> dict:
+    """Parse a GitHub URL and return type + owner/repo info.
+
+    Returns:
+        {"type": "repo",  "owner": "...", "repo": "..."}
+        {"type": "org",   "owner": "..."}
+        {"type": "user",  "owner": "..."}
+        {"type": "unknown"}
+    """
+    url = url.strip().rstrip("/")
+    # Normalise — strip protocol, www, and bare github.com host
+    url = re.sub(r'^https?://(www\.)?github\.com/?', '', url)
+    url = re.sub(r'^(www\.)?github\.com/?', '', url)
+    parts = [p for p in url.split("/") if p]
+
+    if len(parts) == 0:
+        return {"type": "unknown"}
+    if len(parts) == 1:
+        # Could be org or user — check via API
+        owner = parts[0]
+        data = GitHubBrowserScanner._fetch_json(f"https://api.github.com/orgs/{owner}")
+        if isinstance(data, dict) and data.get("type") == "Organization":
+            return {"type": "org", "owner": owner}
+        return {"type": "user", "owner": owner}
+    if len(parts) >= 2:
+        return {"type": "repo", "owner": parts[0], "repo": parts[1]}
+
+    return {"type": "unknown"}
+
+
 class GitHubRadarAgent:
     """Orchestrates the full GitHub crawl pipeline with SSE streaming."""
 
     DEFAULT_SOURCES = {"github", "website", "stackoverflow", "websearch"}
 
-    def __init__(self, keyword: str, max_repos: int = 5, max_contributors: int = 8,
-                 enabled_sources: set = None):
+    def __init__(self, keyword: str = "", max_repos: int = 5, max_contributors: int = 8,
+                 enabled_sources: set = None, github_url: str = ""):
         self.keyword = keyword
+        self.github_url = github_url
         self.max_repos = max_repos
         self.max_contributors = max_contributors
         self.sources = enabled_sources if enabled_sources is not None else self.DEFAULT_SOURCES
@@ -739,14 +815,8 @@ class GitHubRadarAgent:
         emit("complete", "✅ Stack Overflow scan complete!", report)
         return report
 
-    async def run(self, yield_event=None):
-        """
-        Run the full crawl.
-        yield_event(type, message, data=None) — called for SSE streaming.
-        """
-
-        if self.sources == {"stackoverflow"}:
-            return await self.run_stackoverflow_pipeline(yield_event=yield_event)
+    async def run_from_url(self, yield_event=None):
+        """Crawl contributors from a direct GitHub repo/org/user URL."""
 
         def emit(type_, msg, data=None):
             if yield_event:
@@ -754,32 +824,68 @@ class GitHubRadarAgent:
             else:
                 print(f"  [{type_}] {msg}")
 
-        emit("agent", "🚀 GitHub Radar starting...", {"keyword": self.keyword})
+        parsed = parse_github_url(self.github_url)
+        emit("agent", f"🔗 Scanning GitHub URL: {self.github_url}")
+        emit("agent", f"Detected type: {parsed.get('type')} — {parsed.get('owner','')}{('/' + parsed.get('repo','')) if parsed.get('repo') else ''}")
 
         repos: list[Repo] = []
+
+        if parsed["type"] == "repo":
+            repo_name = f"{parsed['owner']}/{parsed['repo']}"
+            repo = Repo(name=repo_name, url=f"https://github.com/{repo_name}")
+            repo = await self.scanner.get_repo_details(repo)
+            emit("repo_detail", f"⭐ {repo.stars:,} stars — {repo.description[:80]}", {
+                "repo": repo.name, "stars": repo.stars, "description": repo.description
+            })
+            repos = [repo]
+
+        elif parsed["type"] in ("org", "user"):
+            owner = parsed["owner"]
+            endpoint = "orgs" if parsed["type"] == "org" else "users"
+            emit("agent", f"📦 Fetching repos for {parsed['type']}: {owner}")
+            repos_data = GitHubBrowserScanner._fetch_json(
+                f"https://api.github.com/{endpoint}/{owner}/repos?sort=stars&per_page={self.max_repos}&type=public"
+            )
+            if isinstance(repos_data, list):
+                for r in repos_data[:self.max_repos]:
+                    repo = Repo(
+                        name=r.get("full_name", ""),
+                        url=r.get("html_url", ""),
+                        stars=r.get("stargazers_count", 0),
+                        description=(r.get("description") or "")[:200],
+                        language=r.get("language") or "",
+                    )
+                    repos.append(repo)
+                emit("repos_found", f"Found {len(repos)} repos for {owner}", {
+                    "repos": [r.name for r in repos]
+                })
+        else:
+            emit("error", f"Could not parse GitHub URL: {self.github_url}")
+            return {"error": "invalid_url", "url": self.github_url}
+
+        # From here — same pipeline as keyword scan
+        self.keyword = self.keyword or parsed.get("owner", "github")
+        return await self._run_pipeline(repos, yield_event=yield_event)
+
+    async def _run_pipeline(self, repos: list, yield_event=None):
+        """Shared pipeline: repos → contributors → emails → analysis → report."""
+
+        def emit(type_, msg, data=None):
+            if yield_event:
+                yield_event(type_, msg, data)
+            else:
+                print(f"  [{type_}] {msg}")
+
         all_contributors: list[Contributor] = []
         all_analyses: list[dict] = []
 
         try:
-            # Start browser
             emit("agent", "🌐 Starting Crawl4AI session...")
             await self.scanner.start()
             emit("agent", "✅ Browser connected")
 
-            # Step 1: Search repos
-            emit("agent", f"🔍 Searching GitHub for: {self.keyword}")
-            repos = await self.scanner.search_repos(self.keyword, self.max_repos)
-            emit("repos_found", f"Found {len(repos)} repos", {"repos": [r.name for r in repos]})
-
-            # Step 2: Get repo details + contributors
             for i, repo in enumerate(repos):
                 emit("scanning_repo", f"📦 Scanning {repo.name} ({i+1}/{len(repos)})")
-
-                repo = await self.scanner.get_repo_details(repo)
-                emit("repo_detail", f"⭐ {repo.stars:,} stars — {repo.description[:80]}", {
-                    "repo": repo.name, "stars": repo.stars, "description": repo.description
-                })
-
                 emit("agent", f"👥 Fetching contributors for {repo.name}...")
                 contributors = await self.scanner.get_contributors(repo, self.max_contributors)
                 repo.contributors = [c.username for c in contributors]
@@ -789,7 +895,6 @@ class GitHubRadarAgent:
                 })
                 all_contributors.extend(contributors)
 
-            # Step 3: Profile top contributors (unique, top 10)
             seen = set()
             unique_contributors = []
             for c in all_contributors:
@@ -803,7 +908,6 @@ class GitHubRadarAgent:
                 emit("profiling", f"👤 Profiling @{contributor.username} ({i+1}/{len(top_to_profile)})")
                 contributor = await self.scanner.get_profile(contributor)
 
-                # ── Email: GitHub commits + events API ───────────────
                 if "github" in self.sources:
                     emit("crawling_email", f"📧 [GitHub] Crawling commits for @{contributor.username}...")
                     crawled_emails = self.scanner.crawl_public_emails(contributor.username)
@@ -811,26 +915,32 @@ class GitHubRadarAgent:
                         contributor.email = ", ".join(sorted(set(crawled_emails)))
                         emit("email_found", f"📧 [GitHub] @{contributor.username} → {contributor.email}")
 
-                if not contributor.email:
-                    if "stackoverflow" in self.sources:
-                        emit("crawling_email", f"📧 [SO] Trying Stack Overflow for @{contributor.username}...")
-                        so_email = GitHubBrowserScanner.enrich_via_stackoverflow(
-                            contributor.username, contributor.name
-                        )
-                        if so_email:
-                            contributor.email = so_email
-                            emit("email_found", f"📧 [SO] @{contributor.username} → {contributor.email}")
+                if not contributor.email and "stackoverflow" in self.sources:
+                    emit("crawling_email", f"📧 [SO] Trying Stack Overflow for @{contributor.username}...")
+                    so_email = GitHubBrowserScanner.enrich_via_stackoverflow(
+                        contributor.username, contributor.name
+                    )
+                    if so_email:
+                        contributor.email = so_email
+                        emit("email_found", f"📧 [SO] @{contributor.username} → {contributor.email}")
+
+                if not contributor.email and PROSPEO_API_KEY and contributor.name and contributor.company:
+                    emit("crawling_email", f"📧 [Prospeo] Looking up @{contributor.username}...")
+                    prospeo_email = GitHubBrowserScanner.enrich_via_prospeo(
+                        contributor.name, contributor.company, contributor.username
+                    )
+                    if prospeo_email:
+                        contributor.email = prospeo_email
+                        emit("email_found", f"📧 [Prospeo] @{contributor.username} → {contributor.email}")
 
                 if not contributor.email:
                     emit("email_none", f"📧 @{contributor.username} — Email not found")
 
                 emit("profile_done", f"@{contributor.username} — {contributor.company or contributor.bio[:50] or 'no bio'}")
 
-            # Stop browser
             await self.scanner.stop()
             emit("agent", "🛑 Browser session closed")
 
-            # Step 4: Analyze with gpt-4o-mini
             emit("agent", f"🧠 Analysing {len(top_to_profile)} contributors with gpt-4o-mini...")
             for contributor in top_to_profile:
                 emit("analyzing", f"🤖 Scoring @{contributor.username}...")
@@ -839,11 +949,61 @@ class GitHubRadarAgent:
                 all_analyses.append(analysis)
                 emit("scored", f"@{contributor.username} → score {analysis.get('activity_score', 0)} ({analysis.get('tier', '?')})", analysis)
 
-            # Step 5: Build report
             emit("agent", "📊 Building report...")
             report = self.analyzer.build_report(self.keyword, repos, all_contributors, all_analyses)
             emit("complete", "✅ GitHub Radar scan complete!", report)
             return report
+
+        except Exception as e:
+            import traceback
+            emit("error", f"❌ {str(e)}")
+            traceback.print_exc()
+            try:
+                await self.scanner.stop()
+            except:
+                pass
+            return {"error": str(e)}
+
+    async def run(self, yield_event=None):
+        """
+        Run the full crawl.
+        yield_event(type, message, data=None) — called for SSE streaming.
+        """
+
+        if self.github_url:
+            return await self.run_from_url(yield_event=yield_event)
+
+        if self.sources == {"stackoverflow"}:
+            return await self.run_stackoverflow_pipeline(yield_event=yield_event)
+
+        def emit(type_, msg, data=None):
+            if yield_event:
+                yield_event(type_, msg, data)
+            else:
+                print(f"  [{type_}] {msg}")
+
+        emit("agent", "🚀 GitHub Radar starting...", {"keyword": self.keyword})
+
+        try:
+            # Step 1: Search repos by keyword
+            emit("agent", "🌐 Starting Crawl4AI session...")
+            await self.scanner.start()
+            emit("agent", "✅ Browser connected")
+            emit("agent", f"🔍 Searching GitHub for: {self.keyword}")
+            repos = await self.scanner.search_repos(self.keyword, self.max_repos)
+            emit("repos_found", f"Found {len(repos)} repos", {"repos": [r.name for r in repos]})
+
+            for i, repo in enumerate(repos):
+                emit("scanning_repo", f"📦 Scanning {repo.name} ({i+1}/{len(repos)})")
+                repo = await self.scanner.get_repo_details(repo)
+                emit("repo_detail", f"⭐ {repo.stars:,} stars — {repo.description[:80]}", {
+                    "repo": repo.name, "stars": repo.stars, "description": repo.description
+                })
+
+            await self.scanner.stop()
+
+            # Step 2: Run shared pipeline
+            return await self._run_pipeline(repos, yield_event=yield_event)
 
         except Exception as e:
             import traceback
