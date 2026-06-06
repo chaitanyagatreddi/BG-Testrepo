@@ -339,28 +339,32 @@ class GitHubBrowserScanner:
 
     @staticmethod
     def enrich_via_prospeo(name: str, company: str, username: str) -> str:
-        """Lookup contributor email via Prospeo API.
+        """Lookup contributor email via Prospeo enrich-person API.
 
         Uses name + company (from GitHub profile) to find verified work email.
         Returns email or empty string. Costs 1 credit per successful match.
         """
         if not PROSPEO_API_KEY:
+            print(f"[Prospeo] SKIP @{username}: no API key")
             return ""
         if not name or not company:
+            print(f"[Prospeo] SKIP @{username}: missing name='{name}' or company='{company}'")
             return ""
         try:
             parts = name.strip().split(maxsplit=1)
             first = parts[0]
             last = parts[1] if len(parts) > 1 else ""
             payload = {
-                "first_name": first,
-                "last_name": last,
-                "full_name": name,
-                "company_name": company,
                 "only_verified_email": True,
+                "data": {
+                    "first_name": first,
+                    "last_name": last,
+                    "full_name": name,
+                    "company_name": company,
+                },
             }
             req = urllib.request.Request(
-                "https://api.prospeo.io/email-finder",
+                "https://api.prospeo.io/enrich-person",
                 data=json.dumps(payload).encode(),
                 headers={
                     "Content-Type": "application/json",
@@ -368,15 +372,27 @@ class GitHubBrowserScanner:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 data = json.loads(resp.read())
-            if data.get("response", {}).get("email"):
-                email = data["response"]["email"].lower()
+
+            if data.get("error"):
+                print(f"[Prospeo] ERROR @{username}: {data.get('error_code')}")
+                return ""
+
+            person = data.get("person") or {}
+            email_obj = person.get("email") or {}
+            email = email_obj.get("email", "").lower()
+
+            if email and email_obj.get("status") == "VERIFIED":
                 NOREPLY = {"noreply@github.com", "users.noreply.github.com"}
                 if not any(nr in email for nr in NOREPLY):
+                    print(f"[Prospeo] FOUND @{username}: {email}")
                     return email
-        except Exception:
-            pass
+            print(f"[Prospeo] NO EMAIL @{username}")
+        except urllib.error.HTTPError as e:
+            print(f"[Prospeo] HTTP {e.code} @{username}: {e.read().decode()[:200]}")
+        except Exception as e:
+            print(f"[Prospeo] EXC @{username}: {e}")
         return ""
 
     # ── Fix B: DuckDuckGo search via Firecrawl ───────────────────
