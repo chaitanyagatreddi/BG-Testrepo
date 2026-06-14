@@ -288,7 +288,15 @@ function exportCSV() {
 }
 
 // Email gate — no storage, works in incognito and iframe sandboxes
-(function showGateAnimated() {
+function _grWhenMotionReady(cb) {
+  if (window.M && window.M.ready) { cb(); return; }
+  var fired = false;
+  function fire() { if (fired) return; fired = true; cb(); }
+  window.addEventListener('motion-ready', fire, { once: true });
+  setTimeout(fire, 600);
+}
+
+function showGateAnimated() {
   var g = document.getElementById('emailGate');
   g.style.display = 'flex';
   if (window.M) {
@@ -308,7 +316,8 @@ function exportCSV() {
       });
     });
   }
-})();
+}
+_grWhenMotionReady(showGateAnimated);
 
 function shakeGateCard() {
   if (!window.M) return;
