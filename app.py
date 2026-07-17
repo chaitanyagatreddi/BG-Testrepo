@@ -2,7 +2,7 @@
 """
 GitHub Radar — Standalone Web App
 ===================================
-Cybersecurity contributor crawler with Browserbase + gpt-4o-mini analysis.
+Dev contributor crawler with Browserbase + gpt-4o-mini analysis.
 Crawls repos, profiles, and publicly available emails.
 """
 
@@ -26,8 +26,8 @@ GITHUB_RADAR_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GitHub Radar | Cybersecurity Contributors</title>
-<meta name="description" content="Find cybersecurity contributors worth knowing — scans GitHub for security tool repos, maps top contributors, scores them with gpt-4o-mini.">
+<title>GitHub Radar | Dev Contributors</title>
+<meta name="description" content="Find dev contributors worth knowing — scans GitHub for developer tool repos, maps top contributors, scores them with gpt-4o-mini.">
 
 <script type="module">
   // Motion One — vanilla animation library. Exposed on window.M so
@@ -39,15 +39,15 @@ GITHUB_RADAR_HTML = """<!DOCTYPE html>
 
 <!-- Open Graph -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="GitHub Radar — Cybersecurity contributor radar">
-<meta property="og:description" content="Find cybersecurity contributors worth knowing.">
+<meta property="og:title" content="GitHub Radar — Dev contributor radar">
+<meta property="og:description" content="Find dev contributors worth knowing.">
 <meta property="og:site_name" content="GitHub Radar">
 <meta property="og:image" content="/og.png">
 
 <!-- Twitter / X -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="GitHub Radar — Cybersecurity contributor radar">
-<meta name="twitter:description" content="Find cybersecurity contributors worth knowing.">
+<meta name="twitter:title" content="GitHub Radar — Dev contributor radar">
+<meta name="twitter:description" content="Find dev contributors worth knowing.">
 <meta name="twitter:image" content="/og.png">
 
 <style>
@@ -142,7 +142,7 @@ GITHUB_RADAR_HTML = """<!DOCTYPE html>
 
 <div class="header">
   <h1>🛡️ GitHub Radar</h1>
-  <span class="badge">Cybersecurity Contributors</span>
+  <span class="badge">Dev Contributors</span>
 </div>
 
 <div class="card">

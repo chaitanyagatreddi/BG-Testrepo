@@ -8,9 +8,9 @@ app_port: 7860
 pinned: false
 ---
 
-# GitHub Radar — Cybersecurity Contributor Crawler
+# GitHub Radar — Dev Contributor Crawler
 
-Scans GitHub for cybersecurity tool repos, maps top contributors, crawls publicly available emails, and scores them with gpt-4o-mini.
+Scans GitHub for developer tool repos, maps top contributors, crawls publicly available emails, and scores them with gpt-4o-mini.
 
 ## Features
 

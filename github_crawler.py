@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-GitHub Radar — Cybersecurity Contributor Crawler
+GitHub Radar — Dev Contributor Crawler
 =================================================
-Uses Browserbase + Playwright to crawl GitHub for cybersecurity repos
+Uses Browserbase + Playwright to crawl GitHub for developer repos
 and map who is contributing to what.
 
 Input:  keyword (e.g. "vulnerability scanner", "SIEM", "pentest")
@@ -28,10 +28,17 @@ from typing import Optional
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 import openai
 
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
+
 # ── Config ────────────────────────────────────────────────────────
 
-GITHUB_TOKEN   = os.environ.get("GITHUB_TOKEN", "")
-OPENAI_KEY     = os.environ.get("OPENAI_API_KEY", "")
+GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
+OPENAI_KEY      = os.environ.get("OPENAI_API_KEY", "")
+ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+USE_CLAUDE      = bool(ANTHROPIC_KEY) and anthropic is not None
 SE_APP_KEY     = os.environ.get("SE_APP_KEY", "")   # optional — raises limit to 10k/day
 PROSPEO_API_KEY = os.environ.get("PROSPEO_API_KEY", "")
 
@@ -59,6 +66,7 @@ class Contributor:
     pinned_repos: list = field(default_factory=list)
     orgs: list = field(default_factory=list)
     email: str = ""
+    email_source: str = ""   # github | stackoverflow | prospeo | search
     website: str = ""
     activity_score: int = 0
     repos_contributed: list = field(default_factory=list)
@@ -573,7 +581,7 @@ Orgs: {', '.join(contributor.orgs)}
 Commits in scanned repos: {contributor.commits}
 Repos contributed to: {', '.join(contributor.repos_contributed)}
 """
-        prompt = f"""You are analyzing a GitHub contributor in the cybersecurity / {keyword} space.
+        prompt = f"""You are analyzing a GitHub contributor in the developer / {keyword} space.
 
 {profile_text}
 
@@ -600,6 +608,82 @@ Return JSON only. No markdown:
             print(f"  ⚠️  Score error for {contributor.username}: {e}")
 
         return {"activity_score": contributor.commits, "tier": "active", "summary": "", "interesting": True}
+
+    def score_contributors_bulk(self, contributors: list, keyword: str) -> list[dict]:
+        """Score ALL contributors in one Claude call. Returns list aligned with input order.
+
+        Falls back to per-contributor OpenAI scoring if Claude isn't available.
+        """
+        if not USE_CLAUDE or not contributors:
+            return [self.score_contributor(c, keyword) for c in contributors]
+
+        # Build compact JSON array of contributor profiles
+        profiles = [
+            {
+                "username": c.username,
+                "name": c.name,
+                "company": c.company,
+                "location": c.location,
+                "bio": (c.bio or "")[:200],
+                "pinned_repos": c.pinned_repos[:5],
+                "orgs": c.orgs[:5],
+                "commits": c.commits,
+                "repos_contributed": c.repos_contributed[:5],
+            }
+            for c in contributors
+        ]
+        prompt = f"""You are scoring {len(profiles)} GitHub contributors in the developer / {keyword} space.
+
+For EACH contributor below, return a score object. Output a single JSON array, same length and order as input.
+
+Input contributors:
+{json.dumps(profiles, indent=2)}
+
+Output schema for each contributor:
+{{
+  "username": "<copy from input>",
+  "activity_score": <0-100, based on commits + repos + engagement>,
+  "tier": "core" | "active" | "emerging",
+  "summary": "<1 sentence: who they are and what they build>",
+  "focus_areas": ["area1", "area2"],
+  "interesting": true | false
+}}
+
+Return ONLY the JSON array. No markdown, no preamble."""
+        try:
+            client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+            msg = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=8000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            txt = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text").strip()
+            start = txt.find("[")
+            end = txt.rfind("]") + 1
+            if start < 0 or end <= start:
+                raise ValueError("no JSON array in response")
+            scored = json.loads(txt[start:end])
+            # Re-align to input order by username
+            score_map = {s.get("username", ""): s for s in scored if isinstance(s, dict)}
+            results = []
+            for c in contributors:
+                s = score_map.get(c.username)
+                if s:
+                    results.append(s)
+                else:
+                    # Missing entry → safe default
+                    results.append({
+                        "username": c.username,
+                        "activity_score": c.commits,
+                        "tier": "active",
+                        "summary": "",
+                        "focus_areas": [],
+                        "interesting": True,
+                    })
+            return results
+        except Exception as e:
+            print(f"  ⚠️  Claude bulk score failed ({e}); falling back to per-contributor OpenAI")
+            return [self.score_contributor(c, keyword) for c in contributors]
 
     def build_report(self, keyword: str, repos: list[Repo], contributors: list[Contributor], analyses: list[dict]) -> dict:
         """Build the final GitHub radar report."""
@@ -646,6 +730,7 @@ Return JSON only. No markdown:
                     "location": c.location,
                     "bio": c.bio,
                     "email": c.email,
+                    "email_source": c.email_source,
                     "activity_score": c.activity_score,
                     "commits": c.commits,
                     "repos_contributed": c.repos_contributed,
@@ -793,14 +878,13 @@ class GitHubRadarAgent:
             )
             contributors.append(c)
 
-        # Step 3: analyze with gpt-4o-mini
-        emit("agent", f"🧠 Analysing {len(contributors)} contributors with gpt-4o-mini...")
-        analyses = []
-        for c in contributors:
-            emit("analyzing", f"🤖 Scoring {c.name}...")
-            analysis = self.analyzer.score_contributor(c, self.keyword)
+        # Step 3: analyze with Claude (bulk, 1 call) — fallback to OpenAI per-contributor
+        model_label = "claude-haiku-4-5 (bulk)" if USE_CLAUDE else "gpt-4o-mini"
+        emit("agent", f"🧠 Analysing {len(contributors)} contributors with {model_label}...")
+        emit("analyzing", f"🤖 Scoring {len(contributors)} contributors in a single call…")
+        analyses = self.analyzer.score_contributors_bulk(contributors, self.keyword)
+        for c, analysis in zip(contributors, analyses):
             analysis["username"] = c.username
-            analyses.append(analysis)
             emit("scored", f"{c.name} → score {analysis.get('activity_score', 0)}", analysis)
 
         # Step 4: build report
@@ -818,6 +902,7 @@ class GitHubRadarAgent:
                     "name": c.name,
                     "location": c.location,
                     "email": c.email,
+                    "email_source": c.email_source,
                     "profile_url": c.profile_url,
                     "website": c.website,
                     "activity_score": analysis_map.get(c.username, {}).get("activity_score", 0),
@@ -929,6 +1014,7 @@ class GitHubRadarAgent:
                     crawled_emails = self.scanner.crawl_public_emails(contributor.username)
                     if crawled_emails:
                         contributor.email = ", ".join(sorted(set(crawled_emails)))
+                        contributor.email_source = "github"
                         emit("email_found", f"📧 [GitHub] @{contributor.username} → {contributor.email}")
 
                 if not contributor.email and "stackoverflow" in self.sources:
@@ -938,16 +1024,27 @@ class GitHubRadarAgent:
                     )
                     if so_email:
                         contributor.email = so_email
+                        contributor.email_source = "stackoverflow"
                         emit("email_found", f"📧 [SO] @{contributor.username} → {contributor.email}")
 
-                if not contributor.email and PROSPEO_API_KEY and contributor.name and contributor.company:
-                    emit("crawling_email", f"📧 [Prospeo] Looking up @{contributor.username}...")
-                    prospeo_email = GitHubBrowserScanner.enrich_via_prospeo(
-                        contributor.name, contributor.company, contributor.username
-                    )
-                    if prospeo_email:
-                        contributor.email = prospeo_email
-                        emit("email_found", f"📧 [Prospeo] @{contributor.username} → {contributor.email}")
+                if not contributor.email:
+                    if not PROSPEO_API_KEY:
+                        emit("crawling_email", f"📧 [Prospeo] SKIP @{contributor.username}: no API key")
+                    elif not contributor.name:
+                        emit("crawling_email", f"📧 [Prospeo] SKIP @{contributor.username}: no name on GitHub")
+                    elif not contributor.company:
+                        emit("crawling_email", f"📧 [Prospeo] SKIP @{contributor.username}: no company on GitHub")
+                    else:
+                        emit("crawling_email", f"📧 [Prospeo] TRYING @{contributor.username} ({contributor.name} @ {contributor.company})...")
+                        prospeo_email = GitHubBrowserScanner.enrich_via_prospeo(
+                            contributor.name, contributor.company, contributor.username
+                        )
+                        if prospeo_email:
+                            contributor.email = prospeo_email
+                            contributor.email_source = "prospeo"
+                            emit("email_found", f"📧 [Prospeo] FOUND @{contributor.username} → {contributor.email}")
+                        else:
+                            emit("crawling_email", f"📧 [Prospeo] NO MATCH @{contributor.username}")
 
                 if not contributor.email:
                     emit("email_none", f"📧 @{contributor.username} — Email not found")
@@ -957,16 +1054,53 @@ class GitHubRadarAgent:
             await self.scanner.stop()
             emit("agent", "🛑 Browser session closed")
 
-            emit("agent", f"🧠 Analysing {len(top_to_profile)} contributors with gpt-4o-mini...")
-            for contributor in top_to_profile:
-                emit("analyzing", f"🤖 Scoring @{contributor.username}...")
-                analysis = self.analyzer.score_contributor(contributor, self.keyword)
+            model_label = "claude-haiku-4-5 (bulk)" if USE_CLAUDE else "gpt-4o-mini"
+            emit("agent", f"🧠 Analysing {len(top_to_profile)} contributors with {model_label}...")
+            emit("analyzing", f"🤖 Scoring {len(top_to_profile)} contributors in a single call…")
+            bulk_results = self.analyzer.score_contributors_bulk(top_to_profile, self.keyword)
+            for contributor, analysis in zip(top_to_profile, bulk_results):
                 analysis["username"] = contributor.username
                 all_analyses.append(analysis)
                 emit("scored", f"@{contributor.username} → score {analysis.get('activity_score', 0)} ({analysis.get('tier', '?')})", analysis)
 
+            # Step 3b: Mamba GTM Suite — company-level enrichment (hiring + tech stack)
+            company_signals: dict[str, dict] = {}
+            if os.environ.get("APIFY_TOKEN", "").strip():
+                try:
+                    import mamba
+                    # Collect unique company domains from contributor profiles
+                    domains = []
+                    for c in top_to_profile:
+                        # Pull domain from contributor.website or .company if it looks like a URL
+                        candidate = (c.website or "").strip() if hasattr(c, "website") else ""
+                        if not candidate and getattr(c, "company", "").startswith("http"):
+                            candidate = c.company.strip()
+                        if candidate:
+                            # Strip protocol, www., trailing path
+                            d = candidate.replace("https://", "").replace("http://", "").split("/")[0]
+                            d = d.removeprefix("www.")
+                            if d and d not in domains:
+                                domains.append(d)
+                    domains = domains[:5]  # cap at 5 to control Apify spend per scan
+
+                    if domains:
+                        emit("agent", f"🏢 Enriching {len(domains)} companies via Mamba GTM Suite (Apify)...")
+                        for d in domains:
+                            emit("enriching_company", f"🏢 {d} — hiring + tech-stack signals")
+                            try:
+                                items = mamba.aggregate_signals(d)
+                                if items and isinstance(items, list):
+                                    company_signals[d] = items[0]
+                                    sig = items[0]
+                                    emit("company_signal", f"  → {d}: {sig.get('composite_signal', '?')} ({sig.get('gtm_role_count', 0)} GTM roles)", sig)
+                            except Exception as ce:
+                                emit("company_signal_skip", f"  ⚠️  {d}: {ce}")
+                except Exception as e:
+                    emit("agent", f"⚠️  Mamba enrichment skipped: {e}")
+
             emit("agent", "📊 Building report...")
             report = self.analyzer.build_report(self.keyword, repos, all_contributors, all_analyses)
+            report["company_signals"] = company_signals
             emit("complete", "✅ GitHub Radar scan complete!", report)
             return report
 
@@ -1036,7 +1170,7 @@ class GitHubRadarAgent:
 
 async def main():
     import argparse
-    parser = argparse.ArgumentParser(description="GitHub Radar — Cybersecurity Contributor Crawler")
+    parser = argparse.ArgumentParser(description="GitHub Radar — Dev Contributor Crawler")
     parser.add_argument("--keyword", default="vulnerability scanner", help="Search keyword")
     parser.add_argument("--repos", type=int, default=3, help="Max repos to scan")
     parser.add_argument("--contributors", type=int, default=6, help="Max contributors per repo")
